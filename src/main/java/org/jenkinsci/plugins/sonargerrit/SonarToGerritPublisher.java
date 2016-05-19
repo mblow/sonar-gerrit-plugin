@@ -1,11 +1,34 @@
 package org.jenkinsci.plugins.sonargerrit;
 
+import java.io.IOException;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.StringTokenizer;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+import javax.annotation.Nullable;
+import javax.servlet.ServletException;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
-import com.google.common.collect.*;
+import com.google.common.collect.Collections2;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.LinkedListMultimap;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Multimap;
+import com.google.common.collect.Multimaps;
 import com.google.gerrit.extensions.api.GerritApi;
 import com.google.gerrit.extensions.api.changes.ReviewInput;
 import com.google.gerrit.extensions.api.changes.RevisionApi;
@@ -40,15 +63,6 @@ import org.jenkinsci.plugins.sonargerrit.data.predicates.ByNewPredicate;
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.QueryParameter;
 
-import javax.annotation.Nullable;
-import javax.servlet.ServletException;
-import java.io.IOException;
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.util.*;
-import java.util.logging.Level;
-import java.util.logging.Logger;
-
 import static org.jenkinsci.plugins.sonargerrit.util.Localization.getLocalized;
 
 /**
@@ -73,6 +87,8 @@ public class SonarToGerritPublisher extends Publisher {
     public static final String GERRIT_CHANGE_NUMBER_ENV_VAR_NAME = "GERRIT_CHANGE_NUMBER";
     public static final String GERRIT_NAME_ENV_VAR_NAME = "GERRIT_NAME";
     public static final String GERRIT_PATCHSET_NUMBER_ENV_VAR_NAME = "GERRIT_PATCHSET_NUMBER";
+
+    public static final String COMPONENT_PATH_MAP_PATH = "target/sonar/component_path.map";
 
     // left here for compatibility with previous version. will be removed in further releases
     private final String path;
@@ -189,7 +205,7 @@ public class SonarToGerritPublisher extends Publisher {
             return false;
         }
 
-        Multimap<String, Issue> file2issues = generateFilenameToIssuesMapFilteredByPredicates(issueInfos);
+        Multimap<String, Issue> file2issues = generateFilenameToIssuesMapFilteredByPredicates(build, listener, issueInfos);
 
         // Step 3 - Prepare Gerrit REST API client
         // Check Gerrit configuration is available
@@ -257,7 +273,7 @@ public class SonarToGerritPublisher extends Publisher {
     }
 
     @VisibleForTesting
-    Multimap<String, Issue> generateFilenameToIssuesMapFilteredByPredicates(List<ReportInfo> issueInfos) {
+    Multimap<String, Issue> generateFilenameToIssuesMapFilteredByPredicates(AbstractBuild build, BuildListener listener, List<ReportInfo> issueInfos) {
         Multimap<String, Issue> file2issues = LinkedListMultimap.create();
         for (ReportInfo info : issueInfos) {
 
@@ -267,7 +283,7 @@ public class SonarToGerritPublisher extends Publisher {
             Iterable<Issue> filtered = filterIssuesByPredicates(report.getIssues());
 
             // Step 2 - Calculate real file name for issues and store to multimap
-            file2issues.putAll(generateFilenameToIssuesMapFilteredByPredicates(info.directoryPath, report, filtered));
+            file2issues.putAll(generateFilenameToIssuesMapFilteredByPredicates(build, listener, info.directoryPath, report, filtered));
         }
         return file2issues;
     }
@@ -430,7 +446,7 @@ public class SonarToGerritPublisher extends Publisher {
     }
 
     @VisibleForTesting
-    Multimap<String, Issue> generateFilenameToIssuesMapFilteredByPredicates(String projectPath, Report report, Iterable<Issue> filtered) {
+    Multimap<String, Issue> generateFilenameToIssuesMapFilteredByPredicates(AbstractBuild build, BuildListener listener, String projectPath, Report report, Iterable<Issue> filtered) {
         Multimap<String, Issue> file2issues = LinkedListMultimap.create();
 
 /*       The next code prepares data to process situations like this one:
@@ -447,16 +463,36 @@ public class SonarToGerritPublisher extends Publisher {
         */
         Map<String, String> component2module = Maps.newHashMap();
         Map<String, String> component2path = Maps.newHashMap();
-
+        FilePath reportPath = build != null ? build.getWorkspace().child(COMPONENT_PATH_MAP_PATH) : null;
+        try {
+            if (reportPath != null && reportPath.exists()) {
+                listener.getLogger().println("Loading component -> path map from "+ COMPONENT_PATH_MAP_PATH);
+                StringTokenizer tokenizer = new StringTokenizer(reportPath.readToString());
+                while (tokenizer.hasMoreTokens()) {
+                    String key = tokenizer.nextToken();
+                    if (!tokenizer.hasMoreTokens()) {
+                        break;
+                    }
+                    String path = tokenizer.nextToken();
+//                    listener.getLogger().println("added mapping from " + key + " to " + path);
+                    component2path.put(key, path);
+                }
+            } else {
+                listener.getLogger().println(COMPONENT_PATH_MAP_PATH + " not found.");
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
         for (Component component : report.getComponents()) {
-            component2path.put(component.getKey(), component.getPath());
+            if (!component2path.containsKey(component.getKey())) {
+                component2path.put(component.getKey(), component.getPath());
+            }
         }
         for (Component component : report.getComponents()) {
             if (component.getModuleKey() != null) {
                 component2module.put(component.getKey(), component2path.get(component.getModuleKey()));
             }
         }
-
 
         // generating map consisting of real file names to corresponding issues collections.
         for (Issue issue : filtered) {

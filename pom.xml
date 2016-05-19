@@ -10,7 +10,7 @@
     </parent>
 
     <artifactId>sonar-gerrit</artifactId>
-    <version>1.0.7-SNAPSHOT</version>
+    <version>1.0.7-mblow-SNAPSHOT</version>
     <packaging>hpi</packaging>
 
     <name>Sonar Gerrit Plugin</name>
