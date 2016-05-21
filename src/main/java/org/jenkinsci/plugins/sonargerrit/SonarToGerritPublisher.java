@@ -439,7 +439,9 @@ public class SonarToGerritPublisher extends Publisher {
             Collection<Issue> issues = new ArrayList<Issue>(finalIssues.get(filename));
             for (Issue i : issues) {
                 if (!rangeSet.contains(i.getLine())) {
-                    finalIssues.get(filename).remove(i);
+                    if (isNewIssuesOnly() && !i.isNew()) {
+                        finalIssues.get(filename).remove(i);
+                    }
                 }
             }
         }
@@ -515,9 +517,11 @@ public class SonarToGerritPublisher extends Publisher {
     Iterable<Issue> filterIssuesByPredicates(List<Issue> issues) {
         Severity sev = Severity.valueOf(severity);
         return Iterables.filter(issues,
-                Predicates.and(
-                        ByMinSeverityPredicate.apply(sev),
-                        ByNewPredicate.apply(isNewIssuesOnly()))
+                changedLinesOnly
+                        ? ByMinSeverityPredicate.apply(sev)
+                        : Predicates.and(
+                                ByMinSeverityPredicate.apply(sev),
+                                ByNewPredicate.apply(isNewIssuesOnly()))
         );
     }
 
