@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.StringTokenizer;
+import java.util.TreeSet;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -110,13 +111,15 @@ public class SonarToGerritPublisher extends Publisher {
     private final String noIssuesNotification;
     private final String issuesNotification;
 
+    private final boolean warnOnCrossProduct;
+
 
     @DataBoundConstructor
     public SonarToGerritPublisher(String sonarURL, List<SubJobConfig> subJobConfigs,
                                   String severity, boolean changedLinesOnly, boolean newIssuesOnly,
                                   String noIssuesToPostText, String someIssuesToPostText, String issueComment,
                                   boolean postScore, String category, String noIssuesScore, String issuesScore,
-                                  String noIssuesNotification, String issuesNotification) {
+                                  String noIssuesNotification, String issuesNotification, boolean warnOnCrossProduct) {
         this.sonarURL = MoreObjects.firstNonNull(sonarURL, DEFAULT_SONAR_URL);
         this.subJobConfigs = subJobConfigs;
         this.severity = MoreObjects.firstNonNull(severity, Severity.MAJOR.name());
@@ -131,6 +134,8 @@ public class SonarToGerritPublisher extends Publisher {
         this.issuesScore = issuesScore;
         this.noIssuesNotification = noIssuesNotification;
         this.issuesNotification = issuesNotification;
+
+        this.warnOnCrossProduct = warnOnCrossProduct;
 
         // old values - not used anymore. will be deleted in further releases
         this.path = null;
@@ -148,6 +153,10 @@ public class SonarToGerritPublisher extends Publisher {
 
     public boolean isNewIssuesOnly() {
         return newIssuesOnly;
+    }
+
+    public boolean isWarnOnCrossProduct() {
+        return warnOnCrossProduct;
     }
 
     public String getSonarURL() {
@@ -199,14 +208,6 @@ public class SonarToGerritPublisher extends Publisher {
     public boolean perform(AbstractBuild build, Launcher launcher, BuildListener listener) throws IOException,
             InterruptedException {
 
-        List<ReportInfo> issueInfos = readSonarReports(listener, build.getWorkspace());
-        if (issueInfos == null) {
-            logMessage(listener, "jenkins.plugin.validation.path.no.project.config.available", Level.SEVERE);
-            return false;
-        }
-
-        Multimap<String, Issue> file2issues = generateFilenameToIssuesMapFilteredByPredicates(build, listener, issueInfos);
-
         // Step 3 - Prepare Gerrit REST API client
         // Check Gerrit configuration is available
         String gerritNameEnvVar = getEnvVar(build, listener, GERRIT_NAME_ENV_VAR_NAME);
@@ -242,6 +243,41 @@ public class SonarToGerritPublisher extends Publisher {
 
             // Step 4 - Filter issues by changed files
             final Map<String, FileInfo> files = revision.files();
+
+            if (warnOnCrossProduct) {
+                Set<String> products = new TreeSet<String>();
+                for (String file : files.keySet()) {
+                    String[] parts = file.split("/");
+                    if (parts.length > 1 && !"".equals(parts[0])) {
+                        products.add(parts[0]);
+                    }
+                }
+                if (products.size() > 1) {
+                    StringBuilder buf = new StringBuilder();
+                    buf.append("WARNING: THIS CHANGE CONTAINS CROSS-PRODUCT CHANGES IN:\n");
+                    for (String prod : products) {
+                        buf.append("* ").append(prod).append('\n');
+                    }
+                    buf.append('\n');
+                    buf.append("PLEASE REVIEW CAREFULLY AND LOOK FOR API CHANGES!");
+
+                    ReviewInput reviewInput = new ReviewInput().message(buf.toString());
+                    revision.review(reviewInput);
+                }
+            }
+
+            List<ReportInfo> issueInfos = readSonarReports(listener, build.getWorkspace());
+
+            if (issueInfos == null) {
+                if (warnOnCrossProduct) {
+                    return true;
+                }
+                logMessage(listener, "jenkins.plugin.validation.path.no.project.config.available", Level.SEVERE);
+                return false;
+            }
+
+            Multimap<String, Issue> file2issues = generateFilenameToIssuesMapFilteredByPredicates(build, listener, issueInfos);
+
             file2issues = Multimaps.filterKeys(file2issues, new Predicate<String>() {
                 @Override
                 public boolean apply(@Nullable String input) {
